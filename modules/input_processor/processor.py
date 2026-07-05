@@ -1,22 +1,21 @@
 """
 processor.py - 多模态输入处理模块
-负责解析用户上传的教学材料（PPT/PDF/图片），提取文本和图像路径，
+负责解析用户上传的教学材料（PPT/PDF/图片/视频），提取文本和图像路径，
 输出统一的结构化JSON数据供后续模型调用使用。
 
 支持的输入格式：
-  - PDF (.pdf)   → 用 pdfplumber 提取每页文本
-  - PPT (.pptx)  → 用 python-pptx 提取每页文本 + 尝试提取内嵌图片
+  - PDF (.pdf)   → 提取每页文本 + 内嵌图片（使用 PyMuPDF）
+  - PPT (.pptx)  → 提取每页文本 + 内嵌图片（使用 python-pptx）
   - 图片 (.png/.jpg等) → 直接作为图像路径保留
-
-输出格式见函数 docstring 和 README 中的接口规范。
+  - 视频 (.mp4/.avi等) → 抽帧保存为图片（可选）
 """
 
 import os
 import shutil
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Tuple
 
-# PDF解析
-import pdfplumber
+# PDF解析（替换为PyMuPDF）
+import fitz  # PyMuPDF
 
 # PPT解析
 from pptx import Presentation
@@ -24,6 +23,9 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 # 图像处理
 from PIL import Image
+
+# 视频处理（可选）
+import cv2
 
 # 项目内工具
 import sys
@@ -51,11 +53,10 @@ class MaterialProcessor:
             raw_dir: 原始上传文件的存放目录
             processed_dir: 处理结果的输出目录
         """
-        # 处理路径（相对于项目根目录）
-        self.raw_dir = raw_dir
-        self.processed_dir = processed_dir
-        ensure_dir(raw_dir)
-        ensure_dir(processed_dir)
+        self.raw_dir = os.path.abspath(raw_dir)
+        self.processed_dir = os.path.abspath(processed_dir)
+        ensure_dir(self.raw_dir)
+        ensure_dir(self.processed_dir)
 
     def process(self, file_path: str) -> Dict[str, Any]:
         """
@@ -63,14 +64,9 @@ class MaterialProcessor:
         Args:
             file_path: 用户上传的文件路径
         Returns:
-            统一格式的材料数据字典，格式：
-            {
-                "material_id": "material_xxx",
-                "title": "文件名",
-                "text_blocks": [{"page": 1, "text": "提取的文字"}, ...],
-                "image_paths": ["图片路径1", "图片路径2"]
-            }
+            统一格式的材料数据字典
         """
+        file_path = os.path.abspath(file_path)
         file_type = get_file_type(file_path)
         material_id = generate_material_id()
         title = get_file_name_without_ext(file_path)
@@ -88,6 +84,8 @@ class MaterialProcessor:
             text_blocks, image_paths = self._parse_ppt(file_path, material_id)
         elif file_type == "image":
             text_blocks, image_paths = self._parse_image(file_path, material_id)
+        elif file_type == "video":
+            text_blocks, image_paths = self._parse_video(file_path, material_id)
         else:
             # 不支持的文件格式，返回空结果
             print(f"[警告] 不支持的文件格式: {file_path}")
@@ -102,81 +100,24 @@ class MaterialProcessor:
         }
 
         # 保存处理结果到 processed 目录
-        output_path = os.path.join(
-            self.processed_dir, f"{material_id}.json"
-        )
+        output_path = os.path.join(self.processed_dir, f"{material_id}.json")
         save_json(material_data, output_path)
         print(f"[完成] 材料已处理并保存到: {output_path}")
 
         return material_data
 
     # ============================================================
-    # PDF 解析
+    # PDF 解析（使用 PyMuPDF）
     # ============================================================
     def _parse_pdf(self, file_path: str, material_id: str
-                   ) -> tuple[List[Dict], List[str]]:
+                   ) -> Tuple[List[Dict], List[str]]:
         """
-        解析 PDF 文件，提取每页文本
+        解析 PDF 文件，提取每页文本和内嵌图片
         Args:
             file_path: PDF 文件路径
-            material_id: 材料ID（用于命名导出文件）
-        Returns:
-            (text_blocks, image_paths) 元组
-            - text_blocks: [{"page": 页码, "text": "文本内容"}, ...]
-            - image_paths: PDF中的图片路径列表（当前为占位，见下方注释）
-
-        ⚠️ 占位说明:
-            PDF 中内嵌图片的提取比较复杂，依赖 pdfminer 的底层 API。
-            当前版本只提取文本，不提取图片。
-            如需图片输入，请使用界面中的"上传补充图片"功能，
-            或手动截图后上传。这是一个已知限制。
-        """
-        text_blocks = []
-
-        try:
-            with pdfplumber.open(file_path) as pdf:
-                for i, page in enumerate(pdf.pages, start=1):
-                    text = page.extract_text()
-                    if text and text.strip():
-                        text_blocks.append({
-                            "page": i,
-                            "text": text.strip(),
-                        })
-
-            if not text_blocks:
-                print(f"[提示] PDF 中未提取到文本内容，可能是扫描版 PDF")
-
-        except Exception as e:
-            print(f"[错误] PDF 解析失败: {e}")
-
-        # ===== 占位: PDF图片提取 =====
-        # pdfplumber 主要用于文本提取，对图片的支持有限。
-        # 如需从 PDF 提取图片，可后续集成 pdfminer.six 的图片提取功能，
-        # 或者使用 PyMuPDF (fitz) 库替代。当前返回空列表。
-        image_paths = []
-
-        return text_blocks, image_paths
-
-    # ============================================================
-    # PPT 解析
-    # ============================================================
-    def _parse_ppt(self, file_path: str, material_id: str
-                   ) -> tuple[List[Dict], List[str]]:
-        """
-        解析 PPT 文件，提取每页文本和内嵌图片
-        Args:
-            file_path: PPT 文件路径
             material_id: 材料ID
         Returns:
-            (text_blocks, image_paths) 元组
-
-        ⚠️ 占位说明:
-            1. 文本提取：正常可用，python-pptx 可提取幻灯片中的文本框文字。
-            2. 内嵌图片提取：尝试从幻灯片中提取嵌入的图片文件（PNG/JPG等），
-               保存到 processed 目录下。能提取就提取，不能则跳过。
-            3. 幻灯片渲染为图片：这是最大的限制。由于需要系统安装 LibreOffice
-               或依赖 Windows COM 组件，当前版本不自动将每页PPT渲染成图片。
-               替代方案：用户可在界面中手动上传PPT截图作为图像输入。
+            (text_blocks, image_paths)
         """
         text_blocks = []
         image_paths = []
@@ -186,11 +127,68 @@ class MaterialProcessor:
         ensure_dir(img_dir)
 
         try:
+            doc = fitz.open(file_path)
+            for page_num, page in enumerate(doc, start=1):
+                # ---- 提取文本 ----
+                text = page.get_text().strip()
+                if text:
+                    text_blocks.append({"page": page_num, "text": text})
+
+                # ---- 提取图片 ----
+                image_list = page.get_images(full=True)
+                for img_index, img in enumerate(image_list):
+                    try:
+                        xref = img[0]
+                        base_image = doc.extract_image(xref)
+                        image_bytes = base_image["image"]
+                        image_ext = base_image["ext"]  # e.g., 'png', 'jpeg'
+
+                        # 生成图片文件名
+                        img_filename = f"page{page_num}_img{img_index}.{image_ext}"
+                        img_path = os.path.join(img_dir, img_filename)
+
+                        # 保存图片
+                        with open(img_path, "wb") as f:
+                            f.write(image_bytes)
+                        image_paths.append(os.path.abspath(img_path))
+                        print(f"[提取图片] {img_filename} (PDF页码{page_num})")
+                    except Exception as e:
+                        # 单张图片提取失败不影响整体
+                        print(f"[跳过图片] PDF页码{page_num}中的图片提取失败: {e}")
+
+            doc.close()
+            if not text_blocks:
+                print("[提示] PDF 中未提取到文本内容，可能是扫描版 PDF")
+
+        except Exception as e:
+            print(f"[错误] PDF 解析失败: {e}")
+
+        return text_blocks, image_paths
+
+    # ============================================================
+    # PPT 解析（增强版）
+    # ============================================================
+    def _parse_ppt(self, file_path: str, material_id: str
+                   ) -> Tuple[List[Dict], List[str]]:
+        """
+        解析 PPT 文件，提取每页文本和内嵌图片
+        Args:
+            file_path: PPT 文件路径
+            material_id: 材料ID
+        Returns:
+            (text_blocks, image_paths)
+        """
+        text_blocks = []
+        image_paths = []
+
+        img_dir = os.path.join(self.processed_dir, f"{material_id}_images")
+        ensure_dir(img_dir)
+
+        try:
             prs = Presentation(file_path)
 
             for slide_idx, slide in enumerate(prs.slides, start=1):
                 slide_texts = []
-                has_text = False
 
                 for shape in slide.shapes:
                     # ---- 提取文本 ----
@@ -199,30 +197,25 @@ class MaterialProcessor:
                             para_text = paragraph.text.strip()
                             if para_text:
                                 slide_texts.append(para_text)
-                                has_text = True
 
-                    # ---- 尝试提取内嵌图片 ----
+                    # ---- 提取内嵌图片 ----
                     if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                         try:
                             image = shape.image
-                            # 获取图片扩展名
                             ext = image.content_type.split("/")[-1]
                             if ext == "jpeg":
                                 ext = "jpg"
-                            img_filename = f"slide{slide_idx}_{shape.shape_id}.{ext}"
+                            img_filename = f"slide{slide_idx}_shape{shape.shape_id}.{ext}"
                             img_path = os.path.join(img_dir, img_filename)
 
-                            # 保存图片
                             with open(img_path, "wb") as f:
                                 f.write(image.blob)
-                            image_paths.append(img_path)
-                            print(f"[提取图片] {img_filename}")
+                            image_paths.append(os.path.abspath(img_path))
+                            print(f"[提取图片] {img_filename} (幻灯片{slide_idx})")
                         except Exception as e:
-                            # 图片提取不是核心功能，失败则跳过
                             print(f"[跳过图片] 幻灯片{slide_idx}中的图片提取失败: {e}")
 
-                # 记录该页文本
-                if has_text:
+                if slide_texts:
                     text_blocks.append({
                         "page": slide_idx,
                         "text": "\n".join(slide_texts),
@@ -234,64 +227,99 @@ class MaterialProcessor:
         except Exception as e:
             print(f"[错误] PPT 解析失败: {e}")
 
-        # ===== 占位: 幻灯片→图片渲染 =====
-        # 将每页PPT渲染为整张图片需要外部工具支持（如 LibreOffice）。
-        # 当前版本不支持此功能。用户可通过界面手动上传截图。
-        # 如果后续想实现，可参考以下方案：
-        #   - Windows: 使用 comtypes 调用 PowerPoint 应用程序导出
-        #   - 跨平台: 调用 LibreOffice --headless --convert-to png
-
+        # 注：PPT整页渲染为图片需要LibreOffice等外部工具，暂不实现。
         return text_blocks, image_paths
 
     # ============================================================
     # 图片解析
     # ============================================================
     def _parse_image(self, file_path: str, material_id: str
-                     ) -> tuple[List[Dict], List[str]]:
+                     ) -> Tuple[List[Dict], List[str]]:
         """
         处理用户上传的图片文件
-        图片本身不需要提取文本（由 Qwen-VL 的视觉能力直接理解），
-        所以这里只保留图片路径，不做 OCR。
-        Args:
-            file_path: 图片文件路径
-            material_id: 材料ID
-        Returns:
-            (text_blocks, image_paths) 元组
-            - text_blocks: 空列表（图片没有可提取的文本）
-            - image_paths: 包含该图片的绝对路径
         """
-        # 将图片复制到处理目录
         img_dir = os.path.join(self.processed_dir, f"{material_id}_images")
         ensure_dir(img_dir)
 
         ext = os.path.splitext(file_path)[1]
         dest_path = os.path.join(img_dir, f"uploaded_image{ext}")
         shutil.copy2(file_path, dest_path)
+        abs_dest = os.path.abspath(dest_path)
 
         # 验证图片是否有效
         try:
-            with Image.open(dest_path) as img:
+            with Image.open(abs_dest) as img:
                 print(f"[图片信息] 尺寸={img.size}, 格式={img.format}")
-
-            # 如果是超大图片，提示用户
             if img.width > 4000 or img.height > 4000:
-                print("[提示] 图片尺寸较大，可能影响API调用速度，建议压缩后上传")
-
+                print("[提示] 图片尺寸较大，建议压缩后上传")
         except Exception as e:
             print(f"[错误] 图片文件无效: {e}")
             return [], []
 
-        # 图片没有文本，返回空text_blocks
-        # 图像理解由 Qwen-VL 在后续步骤中完成
-        return [], [dest_path]
+        return [], [abs_dest]
+
+    # ============================================================
+    # 视频抽帧（新增）
+    # ============================================================
+    def _parse_video(self, file_path: str, material_id: str,
+                     frame_interval: float = 1.0) -> Tuple[List[Dict], List[str]]:
+        """
+        从视频中抽取关键帧作为图片输入
+        Args:
+            file_path: 视频文件路径
+            material_id: 材料ID
+            frame_interval: 抽帧间隔（秒），默认每秒1帧
+        Returns:
+            (text_blocks, image_paths)  text_blocks为空
+        """
+        image_paths = []
+        img_dir = os.path.join(self.processed_dir, f"{material_id}_images")
+        ensure_dir(img_dir)
+
+        try:
+            cap = cv2.VideoCapture(file_path)
+            if not cap.isOpened():
+                print(f"[错误] 无法打开视频文件: {file_path}")
+                return [], []
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0:
+                fps = 30  # 后备
+            frame_skip = int(fps * frame_interval)
+            if frame_skip < 1:
+                frame_skip = 1
+
+            frame_count = 0
+            saved_count = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if frame_count % frame_skip == 0:
+                    img_filename = f"frame_{saved_count:04d}.jpg"
+                    img_path = os.path.join(img_dir, img_filename)
+                    cv2.imwrite(img_path, frame)
+                    image_paths.append(os.path.abspath(img_path))
+                    saved_count += 1
+                    print(f"[提取帧] {img_filename}")
+                frame_count += 1
+
+            cap.release()
+            print(f"[完成] 从视频中抽取 {saved_count} 帧")
+
+        except Exception as e:
+            print(f"[错误] 视频处理失败: {e}")
+
+        return [], image_paths
 
 
 # ============================================================
-# 简单测试入口（直接运行此文件时执行）
+# 简单测试入口
 # ============================================================
 if __name__ == "__main__":
     import sys
 
+    # 创建处理器实例，使用项目默认路径
     processor = MaterialProcessor(
         raw_dir="../../data/raw",
         processed_dir="../../data/processed",
@@ -312,3 +340,5 @@ if __name__ == "__main__":
     print(f"图片数量: {len(result['image_paths'])}")
     for block in result["text_blocks"]:
         print(f"  - 第{block['page']}页: {block['text'][:80]}...")
+    for img in result["image_paths"]:
+        print(f"  - 图片: {img}")
