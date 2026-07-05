@@ -1,67 +1,71 @@
 """
 qwen_engine.py - Qwen-VL 模型调用封装
-基于阿里云 DashScope API，封装三个教学辅助功能：
-  1. generate_summary()   - 知识点总结
-  2. answer_question()    - 学生问答
-  3. generate_quiz()      - 练习题生成
 
-模型: qwen-vl-plus (支持文本+图像多模态输入)
-API文档: https://help.aliyun.com/zh/dashscope/developer-reference/qwen-vl-api
+本模块负责课程项目中的“任务3”：把输入处理模块产出的 material_data
+转换为多模态大模型请求，并稳定返回前端需要的三类结果：
+  1. generate_summary() - 知识点总结
+  2. answer_question()  - 学生问答
+  3. generate_quiz()    - 练习题生成
 
-使用前请设置环境变量: export DASHSCOPE_API_KEY="your-api-key"
+如果没有配置 DASHSCOPE_API_KEY，模块会自动进入 Mock 模式，返回基于
+材料内容生成的假数据，便于离线开发、前端联调和 Demo 兜底展示。
 """
 
-import os
 import json
+import os
 import re
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 
-# ============================================================
-# 常量配置
-# ============================================================
-MODEL_NAME = "qwen-vl-plus"  # 使用性价比最高的版本
+MODEL_NAME = "qwen-vl-plus"
+MAX_TEXT_CHARS = 8000
+MAX_IMAGE_COUNT = 6
 
-# 提示词模板
-PROMPT_SUMMARY = """你是一位专业的教学助手。请仔细分析以下教学材料，生成一份清晰的知识点总结。
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..")
+)
+
+
+PROMPT_SUMMARY = """你是一位专业、严谨的教学助手。请根据给定的教学材料生成知识点总结。
 
 要求：
-1. 提炼材料的核心知识点，用简洁的语言组织
-2. 列出 3-5 个关键要点
-3. 总结长度控制在300-500字
+1. 只基于材料中的文字和图片信息，不要编造材料中没有的内容。
+2. 先给出一段 250-500 字的中文总结。
+3. 再提炼 3-5 个关键要点，每个要点一句话。
+4. 语言要适合 K12 或大学课程学习者理解。
 
-请严格按照以下JSON格式输出，不要输出其他内容：
-```json
+请严格输出 JSON，不要输出 Markdown 解释：
 {
-  "summary": "知识点总结的完整内容...",
-  "key_points": ["要点1", "要点2", "要点3"]
+  "summary": "知识点总结正文",
+  "key_points": ["关键要点1", "关键要点2", "关键要点3"]
 }
-```"""
+"""
 
-PROMPT_ANSWER = """你是一位专业的教学助手。请根据以下教学材料，准确回答学生提出的问题。
 
-教学材料已在前面提供。学生的问题是：
+PROMPT_ANSWER = """你是一位专业、严谨的教学助手。请根据给定的教学材料回答学生问题。
 
-"{question}"
-
-要求：
-1. 回答必须基于教学材料的内容，不要编造信息
-2. 如果材料中没有相关信息，请如实说明："根据所提供的教学材料，未找到与您问题直接相关的信息。"
-3. 回答要清晰、有条理，适合学生理解
-4. 如果适用，可以适当举例说明
-
-请直接输出你的回答，不需要JSON格式。"""
-
-PROMPT_QUIZ = """你是一位专业的教学助手。请根据以下教学材料，生成 {num} 道单项选择题，用于检验学生对该材料的掌握程度。
+学生问题：
+{question}
 
 要求：
-1. 每题4个选项（A/B/C/D），只有一个正确答案
-2. 题目应覆盖材料的主要知识点，难度适中
-3. 每道题需要包含正确答案的详细解析
-4. 选项要有区分度（干扰项要有一定迷惑性但不是完全无关）
+1. 回答必须基于教学材料，不要编造信息。
+2. 如果材料中没有相关信息，请明确说明：“根据所提供的教学材料，未找到与该问题直接相关的信息。”
+3. 回答要清晰、有条理，必要时可以分点说明。
+4. 语言要适合学生理解。
 
-请严格按照以下JSON格式输出，不要输出其他内容：
-```json
+请直接输出回答文本，不需要 JSON。
+"""
+
+
+PROMPT_QUIZ = """你是一位专业、严谨的教学助手。请根据给定的教学材料生成 {num} 道单项选择题。
+
+要求：
+1. 每题 4 个选项，格式为 A/B/C/D，且只有一个正确答案。
+2. 题目必须来自材料中的主要知识点。
+3. 干扰项要有一定迷惑性，但不能明显荒谬。
+4. 每题都要给出答案和简短解析。
+
+请严格输出 JSON，不要输出 Markdown 解释：
 {
   "questions": [
     {
@@ -69,379 +73,545 @@ PROMPT_QUIZ = """你是一位专业的教学助手。请根据以下教学材料
       "question": "题目内容？",
       "options": ["A. 选项内容", "B. 选项内容", "C. 选项内容", "D. 选项内容"],
       "answer": "A",
-      "explanation": "这道题的解析，说明为什么选这个答案"
+      "explanation": "解析内容"
     }
   ]
 }
-```"""
+"""
 
 
 class QwenEngine:
-    """
-    Qwen-VL 模型调用引擎
-    封装 DashScope API 调用，提供教学辅助功能
-    """
+    """Qwen-VL 教学辅助引擎。"""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: str = MODEL_NAME,
+        use_mock: Optional[bool] = None,
+    ):
         """
-        初始化引擎
         Args:
-            api_key: DashScope API Key。如果为None，从环境变量读取
+            api_key: DashScope API Key。不传时从 DASHSCOPE_API_KEY 读取。
+            model_name: DashScope 多模态模型名称。
+            use_mock: True 强制使用假数据；False 强制尝试真实 API；
+                None 时根据 API Key 和依赖自动判断。
         """
-        # 优先使用传入的key，否则从环境变量读取
-        self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
+        self.model_name = model_name
+        self.api_key = api_key if api_key is not None else os.environ.get(
+            "DASHSCOPE_API_KEY", ""
+        )
+        self.dashscope_available = False
+
+        if use_mock is True:
+            self.use_mock = True
+            return
 
         if not self.api_key:
-            print("=" * 60)
-            print("⚠️  警告: 未设置 DASHSCOPE_API_KEY 环境变量")
-            print("   模型调用将返回 MOCK 数据，仅供测试界面使用")
-            print("   请通过以下方式设置真实的 API Key:")
-            print("   - Windows: set DASHSCOPE_API_KEY=your-key-here")
-            print("   - Linux/Mac: export DASHSCOPE_API_KEY=your-key-here")
-            print("   获取 Key: https://dashscope.console.aliyun.com/")
-            print("=" * 60)
             self.use_mock = True
-        else:
+            self._print_mock_notice("未检测到 DASHSCOPE_API_KEY")
+            return
+
+        try:
+            import dashscope  # noqa: F401
+
+            self.dashscope_available = True
             self.use_mock = False
-            # 验证 dashscope 是否已安装
-            try:
-                import dashscope
-                self.dashscope = dashscope
-            except ImportError:
-                print("[错误] 未安装 dashscope，请运行: pip install dashscope")
-                self.use_mock = True
+        except ImportError:
+            self.use_mock = True if use_mock is None else False
+            self._print_mock_notice("未安装 dashscope，已切换为 Mock 模式")
 
     # ========================================================
-    # 公开方法
+    # Public API used by app/main.py
     # ========================================================
 
-    def generate_summary(self, material_data: Dict[str, Any]
-                         ) -> Dict[str, Any]:
-        """
-        根据教学材料生成知识点总结
-        Args:
-            material_data: 材料数据（processor输出的格式）
-        Returns:
-            {"material_id": "...", "summary": "...", "key_points": [...]}
-        """
+    def generate_summary(self, material_data: Dict[str, Any]) -> Dict[str, Any]:
+        """根据教学材料生成知识点总结。"""
+        material_data = self._normalize_material(material_data)
         print("\n[模型调用] 正在生成知识点总结...")
 
         if self.use_mock:
             return self._mock_summary(material_data)
 
-        # 构建消息
-        messages = self._build_messages(material_data, PROMPT_SUMMARY)
-        # 调用API
-        raw_response = self._call_api(messages)
-        # 解析JSON输出
-        result = self._parse_json_response(raw_response)
+        try:
+            messages = self._build_messages(material_data, PROMPT_SUMMARY)
+            raw_response = self._call_api(messages)
+            parsed = self._parse_json_response(raw_response)
+            return self._normalize_summary(parsed, material_data)
+        except Exception as exc:
+            return {
+                "material_id": material_data["material_id"],
+                "summary": "",
+                "key_points": [],
+                "error": f"知识点总结生成失败：{exc}",
+            }
 
-        result["material_id"] = material_data.get("material_id", "")
-        return result
-
-    def answer_question(self, material_data: Dict[str, Any],
-                        question: str) -> Dict[str, Any]:
-        """
-        基于教学材料回答学生问题
-        Args:
-            material_data: 材料数据
-            question: 学生提出的问题
-        Returns:
-            {"material_id": "...", "question": "...", "answer": "..."}
-        """
+    def answer_question(
+        self, material_data: Dict[str, Any], question: str
+    ) -> Dict[str, Any]:
+        """基于教学材料回答学生问题。"""
+        material_data = self._normalize_material(material_data)
+        question = (question or "").strip()
         print(f"\n[模型调用] 正在回答问题: {question[:50]}...")
+
+        if not question:
+            return {
+                "material_id": material_data["material_id"],
+                "question": question,
+                "answer": "请输入需要回答的问题。",
+            }
 
         if self.use_mock:
             return self._mock_answer(material_data, question)
 
-        # 将问题填入提示词模板
-        prompt = PROMPT_ANSWER.format(question=question)
-        messages = self._build_messages(material_data, prompt)
-        raw_response = self._call_api(messages)
+        try:
+            prompt = PROMPT_ANSWER.format(question=question)
+            messages = self._build_messages(material_data, prompt)
+            answer = self._call_api(messages).strip()
+            return {
+                "material_id": material_data["material_id"],
+                "question": question,
+                "answer": answer or "模型未返回有效回答。",
+            }
+        except Exception as exc:
+            return {
+                "material_id": material_data["material_id"],
+                "question": question,
+                "answer": f"模型调用失败：{exc}",
+                "error": str(exc),
+            }
 
-        return {
-            "material_id": material_data.get("material_id", ""),
-            "question": question,
-            "answer": raw_response.strip(),
-        }
-
-    def generate_quiz(self, material_data: Dict[str, Any],
-                      num_questions: int = 5) -> Dict[str, Any]:
-        """
-        根据教学材料生成练习题
-        Args:
-            material_data: 材料数据
-            num_questions: 生成的题目数量（默认5道）
-        Returns:
-            {"material_id": "...", "questions": [...]}
-        """
-        print(f"\n[模型调用] 正在生成{num_questions}道练习题...")
+    def generate_quiz(
+        self, material_data: Dict[str, Any], num_questions: int = 5
+    ) -> Dict[str, Any]:
+        """根据教学材料生成单项选择题。"""
+        material_data = self._normalize_material(material_data)
+        num_questions = self._clamp_question_count(num_questions)
+        print(f"\n[模型调用] 正在生成 {num_questions} 道练习题...")
 
         if self.use_mock:
             return self._mock_quiz(material_data, num_questions)
 
-        prompt = PROMPT_QUIZ.format(num=num_questions)
-        messages = self._build_messages(material_data, prompt)
-        raw_response = self._call_api(messages)
-        result = self._parse_json_response(raw_response)
-
-        result["material_id"] = material_data.get("material_id", "")
-        return result
+        try:
+            prompt = PROMPT_QUIZ.replace("{num}", str(num_questions))
+            messages = self._build_messages(material_data, prompt)
+            raw_response = self._call_api(messages)
+            parsed = self._parse_json_response(raw_response)
+            return self._normalize_quiz(parsed, material_data, num_questions)
+        except Exception as exc:
+            return {
+                "material_id": material_data["material_id"],
+                "questions": [],
+                "error": f"练习题生成失败：{exc}",
+            }
 
     # ========================================================
-    # 内部方法
+    # Request construction and API calling
     # ========================================================
 
-    def _build_messages(self, material_data: Dict[str, Any],
-                        prompt: str) -> List[Dict]:
-        """
-        构建发送给 Qwen-VL 的消息体
-        将材料中的文本和图像一起打包，让模型获得完整的上下文
+    def _build_messages(
+        self, material_data: Dict[str, Any], prompt: str
+    ) -> List[Dict[str, Any]]:
+        """构建 DashScope MultiModalConversation 的 messages。"""
+        material_data = self._normalize_material(material_data)
+        content: List[Dict[str, str]] = []
 
-        Args:
-            material_data: 材料数据
-            prompt: 提示词文本
-        Returns:
-            DashScope 格式的消息列表
-        """
-        content = []
-
-        # 1. 添加文本内容（材料提取的文字）
+        title = material_data.get("title", "未命名教学材料")
         text_blocks = material_data.get("text_blocks", [])
-        if text_blocks:
-            material_text = self._format_material_text(text_blocks)
-            content.append({
-                "text": f"以下是教学材料的内容：\n\n{material_text}"
-            })
+        material_text = self._format_material_text(text_blocks)
+
+        if material_text:
+            material_text = self._truncate_text(material_text, MAX_TEXT_CHARS)
+            content.append(
+                {
+                    "text": (
+                        f"教学材料标题：{title}\n\n"
+                        f"以下是从材料中提取的文字内容：\n{material_text}"
+                    )
+                }
+            )
         else:
-            content.append({
-                "text": "（教学材料中未提取到文字内容，请主要依据图片信息）"
-            })
+            content.append(
+                {
+                    "text": (
+                        f"教学材料标题：{title}\n\n"
+                        "未提取到可用文字内容，请主要依据后续图片信息进行理解。"
+                    )
+                }
+            )
 
-        # 2. 添加图像内容（材料中的图片 + 用户上传的截图）
-        image_paths = material_data.get("image_paths", [])
-        for img_path in image_paths:
-            if os.path.exists(img_path):
-                # DashScope 支持 file:// 协议加载本地图片
-                content.append({
-                    "image": f"file://{os.path.abspath(img_path)}"
-                })
+        for image_path in self._valid_image_paths(material_data):
+            content.append({"image": f"file://{image_path}"})
 
-        # 3. 添加提示词
         content.append({"text": prompt})
+        return [{"role": "user", "content": content}]
 
-        # 4. 组装消息
-        messages = [{"role": "user", "content": content}]
-        return messages
-
-    def _format_material_text(self, text_blocks: List[Dict]) -> str:
-        """
-        将材料文本格式化为易读的字符串
-        Args:
-            text_blocks: [{"page": 1, "text": "..."}, ...]
-        Returns:
-            格式化后的文本字符串
-        """
-        lines = []
-        for block in text_blocks:
-            page = block.get("page", "?")
-            text = block.get("text", "")
-            lines.append(f"--- 第{page}页 ---\n{text}")
-        return "\n\n".join(lines)
-
-    def _call_api(self, messages: List[Dict]) -> str:
-        """
-        调用 DashScope MultiModalConversation API
-        Args:
-            messages: 消息列表
-        Returns:
-            模型返回的文本内容
-        Raises:
-            RuntimeError: API调用失败时抛出
-        """
+    def _call_api(self, messages: List[Dict[str, Any]]) -> str:
+        """调用 DashScope Qwen-VL API，并抽取文本回答。"""
         try:
             from dashscope import MultiModalConversation
 
             response = MultiModalConversation.call(
-                model=MODEL_NAME,
+                model=self.model_name,
                 messages=messages,
                 api_key=self.api_key,
             )
+        except Exception as exc:
+            raise RuntimeError(f"DashScope 请求失败：{exc}") from exc
 
-            # 检查响应状态
-            if response.status_code == 200:
-                # 提取文本内容
-                output = response.output
-                if output and output.choices:
-                    choice = output.choices[0]
-                    if choice.message and choice.message.content:
-                        # content 是一个列表，取第一段的text
-                        for item in choice.message.content:
-                            if "text" in item:
-                                return item["text"]
-                        # 如果content里没有text（纯图片回复等极端情况）
-                        return str(choice.message.content)
+        status_code = self._get_attr(response, "status_code")
+        if status_code != 200:
+            message = self._get_attr(response, "message", "未知错误")
+            raise RuntimeError(f"DashScope 返回异常：code={status_code}, message={message}")
 
-                print(f"[警告] API返回格式异常: {response.output}")
-                return ""
+        output = self._get_attr(response, "output")
+        choices = self._get_attr(output, "choices", [])
+        if not choices:
+            raise RuntimeError("DashScope 未返回 choices")
 
-            else:
-                error_msg = f"API调用失败: code={response.status_code}, message={response.message}"
-                print(f"[错误] {error_msg}")
-                raise RuntimeError(error_msg)
+        choice = choices[0]
+        message = self._get_attr(choice, "message")
+        content = self._get_attr(message, "content", [])
+        if isinstance(content, str):
+            return content
 
-        except ImportError:
-            print("[错误] dashscope库未安装，请运行: pip install dashscope")
-            raise
-        except Exception as e:
-            print(f"[错误] API调用异常: {e}")
-            raise RuntimeError(f"Qwen-VL API调用失败: {e}")
+        if isinstance(content, list):
+            texts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("text"):
+                    texts.append(str(item["text"]))
+            if texts:
+                return "\n".join(texts)
+            return json.dumps(content, ensure_ascii=False)
+
+        raise RuntimeError("DashScope 返回格式无法解析")
+
+    # ========================================================
+    # Parsing and normalization
+    # ========================================================
 
     def _parse_json_response(self, raw_response: str) -> Dict[str, Any]:
-        """
-        从模型回复中解析JSON
-        模型有时会在JSON外层包裹 ```json ... ``` 标记，需要处理
-
-        Args:
-            raw_response: 模型的原始文本回复
-        Returns:
-            解析后的字典。解析失败时返回带error字段的字典
-        """
-        if not raw_response:
+        """从模型回复中解析 JSON，兼容 Markdown code fence 和前后解释文本。"""
+        if not raw_response or not raw_response.strip():
             return {"error": "模型未返回有效内容"}
 
-        # 尝试提取被 ```json ``` 包裹的JSON
-        json_match = re.search(
-            r'```(?:json)?\s*\n?(.*?)\n?```',
-            raw_response, re.DOTALL
-        )
-
-        if json_match:
-            json_str = json_match.group(1).strip()
-        else:
-            # 尝试将整个回复当作JSON解析
-            json_str = raw_response.strip()
-
+        candidate = self._extract_json_candidate(raw_response)
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            print(f"[警告] JSON解析失败: {e}")
-            print(f"[调试] 原始回复前500字: {raw_response[:500]}")
-            # 返回一个包含原始文本的降级结果
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
             return {
-                "error": f"模型输出格式异常，未能解析为JSON",
+                "error": f"模型输出不是合法 JSON：{exc}",
                 "raw_output": raw_response[:1000],
             }
 
-    # ========================================================
-    # Mock 数据（API不可用时的降级方案）
-    # ========================================================
-    # 注意：以下所有 mock_ 方法仅在未设置 DASHSCOPE_API_KEY 时使用
-    # 目的是让Demo在没有API的情况下也能展示界面功能
+    def _normalize_summary(
+        self, parsed: Dict[str, Any], material_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        material_id = material_data["material_id"]
+        if "error" in parsed:
+            parsed["material_id"] = material_id
+            return parsed
 
-    def _mock_summary(self, material_data: Dict) -> Dict[str, Any]:
-        """生成模拟的知识点总结"""
+        summary = str(parsed.get("summary") or parsed.get("content") or "").strip()
+        key_points = parsed.get("key_points") or parsed.get("points") or []
+        if isinstance(key_points, str):
+            key_points = [
+                item.strip(" -0123456789.、")
+                for item in key_points.splitlines()
+                if item.strip()
+            ]
+        if not isinstance(key_points, list):
+            key_points = []
+
+        return {
+            "material_id": material_id,
+            "summary": summary or "模型未返回总结内容。",
+            "key_points": [str(point).strip() for point in key_points if str(point).strip()],
+        }
+
+    def _normalize_quiz(
+        self,
+        parsed: Dict[str, Any],
+        material_data: Dict[str, Any],
+        num_questions: int,
+    ) -> Dict[str, Any]:
+        material_id = material_data["material_id"]
+        if "error" in parsed:
+            parsed["material_id"] = material_id
+            return parsed
+
+        questions = parsed.get("questions", [])
+        if not isinstance(questions, list):
+            questions = []
+
+        normalized = []
+        for item in questions[:num_questions]:
+            if not isinstance(item, dict):
+                continue
+            options = item.get("options", [])
+            if not isinstance(options, list):
+                options = []
+            options = [str(opt).strip() for opt in options if str(opt).strip()]
+            answer = str(item.get("answer", "")).strip().upper()
+            answer = answer[:1] if answer else "A"
+            normalized.append(
+                {
+                    "type": item.get("type", "single_choice"),
+                    "question": str(item.get("question", "未命名题目")).strip(),
+                    "options": options,
+                    "answer": answer,
+                    "explanation": str(item.get("explanation", "暂无解析")).strip(),
+                }
+            )
+
+        return {"material_id": material_id, "questions": normalized}
+
+    # ========================================================
+    # Mock mode
+    # ========================================================
+
+    def _mock_summary(self, material_data: Dict[str, Any]) -> Dict[str, Any]:
+        """生成贴近材料内容的模拟总结。"""
+        material_id = material_data["material_id"]
         title = material_data.get("title", "教学材料")
+        sentences = self._material_sentences(material_data)
+        images = material_data.get("image_paths", [])
+
+        if sentences:
+            preview = "；".join(sentences[:3])
+            summary = (
+                "【模拟数据 - 配置 DASHSCOPE_API_KEY 后将调用真实 Qwen-VL】\n\n"
+                f"《{title}》主要围绕以下内容展开：{preview}。"
+                "系统会把提取出的文字和图片一起交给多模态模型，用于生成更完整的教学总结。"
+            )
+            key_points = self._mock_key_points(sentences)
+        elif images:
+            summary = (
+                "【模拟数据 - 配置 DASHSCOPE_API_KEY 后将调用真实 Qwen-VL】\n\n"
+                f"《{title}》当前主要包含图片材料。真实模式下，Qwen-VL 会直接理解图片中的"
+                "图表、公式、版面和文字信息，并据此生成知识点总结。"
+            )
+            key_points = [
+                "识别图片中的教学内容和视觉结构",
+                "提取图表、公式或课件截图中的关键信息",
+                "将视觉信息转化为可阅读的学习总结",
+            ]
+        else:
+            summary = (
+                "【模拟数据 - 配置 DASHSCOPE_API_KEY 后将调用真实 Qwen-VL】\n\n"
+                f"《{title}》暂未解析出文字或图片内容，请检查上传材料是否有效。"
+            )
+            key_points = ["等待有效教学材料输入", "完成解析后可生成总结", "可继续进行问答和出题"]
+
         return {
-            "material_id": material_data.get("material_id", ""),
-            "summary": (
-                f"【模拟数据 - 请配置API Key获取真实结果】\n\n"
-                f"根据《{title}》的内容分析，该教学材料涵盖了以下核心领域：\n\n"
-                f"1. 基础概念与定义：材料首先介绍了相关领域的基本概念，"
-                f"帮助学生建立对新知识的初步理解。\n\n"
-                f"2. 核心原理与机制：深入讲解了关键原理的工作机制，"
-                f"通过实例说明了抽象概念在实际中的应用。\n\n"
-                f"3. 应用与实践：展示了如何将理论知识应用到实际问题中，"
-                f"培养学生的分析能力和解决问题的能力。\n\n"
-                f"（以上为模拟内容，配置 DashScope API Key 后将生成基于实际材料的个性化总结）"
-            ),
-            "key_points": [
-                "掌握课程核心概念的定义和内涵（模拟）",
-                "理解关键原理的工作机制和应用场景（模拟）",
-                "能够运用所学知识解决实际问题（模拟）",
-            ],
+            "material_id": material_id,
+            "summary": summary,
+            "key_points": key_points,
         }
 
-    def _mock_answer(self, material_data: Dict, question: str) -> Dict[str, Any]:
-        """生成模拟的问题回答"""
+    def _mock_answer(self, material_data: Dict[str, Any], question: str) -> Dict[str, Any]:
+        """生成基于材料片段的模拟回答。"""
+        sentences = self._material_sentences(material_data)
+        relevant = self._find_relevant_sentences(question, sentences)
+
+        if relevant:
+            answer = (
+                "【模拟数据 - 配置 DASHSCOPE_API_KEY 后将调用真实 Qwen-VL】\n\n"
+                "根据当前材料中可解析出的内容，和这个问题最相关的信息是："
+                f"{'；'.join(relevant)}。\n\n"
+                "真实模式下，模型会结合完整文本和图片进一步组织成更自然、准确的回答。"
+            )
+        elif material_data.get("image_paths"):
+            answer = (
+                "【模拟数据 - 配置 DASHSCOPE_API_KEY 后将调用真实 Qwen-VL】\n\n"
+                "当前材料主要是图片或截图，离线 Mock 模式无法真正理解图片内容。"
+                "真实模式下，Qwen-VL 会读取图片后回答该问题。"
+            )
+        else:
+            answer = (
+                "【模拟数据 - 配置 DASHSCOPE_API_KEY 后将调用真实 Qwen-VL】\n\n"
+                "根据当前解析结果，暂未找到可用于回答该问题的材料内容。"
+            )
+
         return {
-            "material_id": material_data.get("material_id", ""),
+            "material_id": material_data["material_id"],
             "question": question,
-            "answer": (
-                f"【模拟数据 - 请配置API Key获取真实结果】\n\n"
-                f"关于您的问题“{question}”，根据教学材料的内容：\n\n"
-                f"这是一个很好的问题。在实际部署版本中，Qwen-VL模型会基于"
-                f"教学材料的文本和图像内容，针对您的具体问题生成准确的回答。"
-                f"当前为离线Demo模式，展示的是占位回答。\n\n"
-                f"请设置环境变量 DASHSCOPE_API_KEY 后重启应用以启用AI问答功能。"
-            ),
+            "answer": answer,
         }
 
-    def _mock_quiz(self, material_data: Dict, num: int) -> Dict[str, Any]:
-        """生成模拟的练习题"""
-        mock_questions = []
-        for i in range(1, min(num, 5) + 1):
-            mock_questions.append({
-                "type": "single_choice",
-                "question": f"【模拟题目{i}】根据教学材料，以下哪个选项是正确的？（请配置API Key获取真实题目）",
-                "options": [
-                    "A. 模拟选项一（这是正确答案的占位）",
-                    "B. 模拟选项二（这是一个干扰项）",
-                    "C. 模拟选项三（这是另一个干扰项）",
-                    "D. 模拟选项四（这也是一个干扰项）",
-                ],
-                "answer": "A",
-                "explanation": f"【模拟解析】在实际版本中，这里会显示对正确答案的详细解析，帮助学生理解为什么选A而不是其他选项。",
-            })
+    def _mock_quiz(self, material_data: Dict[str, Any], num: int) -> Dict[str, Any]:
+        """生成结构稳定的模拟练习题。"""
+        sentences = self._material_sentences(material_data)
+        if not sentences:
+            sentences = [
+                "多模态教学辅助系统可以同时处理文字和图片材料",
+                "系统能够生成知识点总结、学生问答和练习题",
+                "真实模式下会调用 Qwen-VL 完成视觉语言联合理解",
+            ]
 
+        questions = []
+        for index in range(num):
+            fact = sentences[index % len(sentences)]
+            questions.append(
+                {
+                    "type": "single_choice",
+                    "question": f"【模拟题目{index + 1}】根据材料，以下哪项表述最符合内容？",
+                    "options": [
+                        f"A. {self._shorten(fact, 42)}",
+                        "B. 材料只支持纯文本，不能使用图片信息",
+                        "C. 系统不会根据教学材料生成任何输出",
+                        "D. 练习题内容与上传材料完全无关",
+                    ],
+                    "answer": "A",
+                    "explanation": (
+                        "A 项来自当前解析到的材料内容。真实模式下，题目和干扰项会由"
+                        "Qwen-VL 根据完整材料自动生成。"
+                    ),
+                }
+            )
+
+        return {"material_id": material_data["material_id"], "questions": questions}
+
+    # ========================================================
+    # Utilities
+    # ========================================================
+
+    def _normalize_material(self, material_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        material_data = material_data or {}
+        text_blocks = material_data.get("text_blocks") or []
+        image_paths = material_data.get("image_paths") or []
         return {
-            "material_id": material_data.get("material_id", ""),
-            "questions": mock_questions,
+            "material_id": str(material_data.get("material_id") or "material_unknown"),
+            "title": str(material_data.get("title") or "未命名教学材料"),
+            "text_blocks": text_blocks if isinstance(text_blocks, list) else [],
+            "image_paths": image_paths if isinstance(image_paths, list) else [],
         }
 
+    def _format_material_text(self, text_blocks: List[Dict[str, Any]]) -> str:
+        lines = []
+        for block in text_blocks:
+            if not isinstance(block, dict):
+                continue
+            text = str(block.get("text") or "").strip()
+            if not text:
+                continue
+            page = block.get("page", "?")
+            lines.append(f"--- 第{page}页 ---\n{text}")
+        return "\n\n".join(lines)
 
-# ============================================================
-# 简单测试入口
-# ============================================================
+    def _valid_image_paths(self, material_data: Dict[str, Any]) -> List[str]:
+        valid_paths = []
+        for raw_path in material_data.get("image_paths", [])[:MAX_IMAGE_COUNT]:
+            resolved = self._resolve_path(str(raw_path))
+            if os.path.exists(resolved):
+                valid_paths.append(os.path.abspath(resolved))
+        return valid_paths
+
+    def _resolve_path(self, path: str) -> str:
+        if os.path.isabs(path):
+            return path
+        return os.path.abspath(os.path.join(PROJECT_ROOT, path))
+
+    def _material_sentences(self, material_data: Dict[str, Any]) -> List[str]:
+        text = self._format_material_text(material_data.get("text_blocks", []))
+        text = re.sub(r"--- 第.*?页 ---", "。", text)
+        parts = re.split(r"[。！？!?；;\n]+", text)
+        sentences = [part.strip() for part in parts if part.strip()]
+        return [self._shorten(sentence, 120) for sentence in sentences]
+
+    def _mock_key_points(self, sentences: List[str]) -> List[str]:
+        key_points = []
+        for sentence in sentences:
+            point = self._shorten(sentence, 60)
+            if point and point not in key_points:
+                key_points.append(point)
+            if len(key_points) >= 5:
+                break
+        while len(key_points) < 3:
+            key_points.append("结合材料中的文字和图片信息进行理解")
+        return key_points
+
+    def _find_relevant_sentences(self, question: str, sentences: List[str]) -> List[str]:
+        if not question or not sentences:
+            return sentences[:1]
+
+        question_chars = {
+            ch for ch in question if ch.strip() and ch not in "，。！？；：、,.!?;:"
+        }
+        scored = []
+        for sentence in sentences:
+            sentence_chars = set(sentence)
+            score = len(question_chars & sentence_chars)
+            scored.append((score, sentence))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [sentence for score, sentence in scored[:2] if score > 0]
+
+    def _extract_json_candidate(self, raw_response: str) -> str:
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", raw_response, re.DOTALL)
+        if fenced:
+            return fenced.group(1).strip()
+
+        start = raw_response.find("{")
+        end = raw_response.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return raw_response[start : end + 1].strip()
+
+        return raw_response.strip()
+
+    def _truncate_text(self, text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "\n\n...（材料内容较长，已截断用于模型输入）"
+
+    def _shorten(self, text: str, max_chars: int) -> str:
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1] + "…"
+
+    def _clamp_question_count(self, num_questions: Any) -> int:
+        try:
+            count = int(num_questions)
+        except (TypeError, ValueError):
+            count = 5
+        return max(1, min(count, 10))
+
+    def _get_attr(self, obj: Any, key: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    def _print_mock_notice(self, reason: str) -> None:
+        print("=" * 60)
+        print(f"提示：{reason}")
+        print("模型模块将使用 Mock 模式，适合离线联调和界面演示。")
+        print("如需真实调用，请安装 dashscope 并设置 DASHSCOPE_API_KEY。")
+        print("=" * 60)
+
+
 if __name__ == "__main__":
-    import sys
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-    # 测试：使用模拟材料数据
     test_material = {
         "material_id": "test_001",
         "title": "光合作用原理",
         "text_blocks": [
             {
                 "page": 1,
-                "text": "光合作用是植物利用光能将二氧化碳和水转化为有机物和氧气的过程。"
-                       "光合作用发生在叶绿体中，分为光反应和暗反应两个阶段。"
+                "text": (
+                    "光合作用是植物利用光能将二氧化碳和水转化为有机物和氧气的过程。"
+                    "光合作用发生在叶绿体中，分为光反应和暗反应两个阶段。"
+                ),
             },
             {
                 "page": 2,
-                "text": "光反应在类囊体膜上进行，将光能转化为ATP和NADPH。"
-                       "暗反应在叶绿体基质中进行，利用ATP和NADPH将CO2固定为糖类。"
+                "text": (
+                    "光反应在类囊体膜上进行，将光能转化为 ATP 和 NADPH。"
+                    "暗反应在叶绿体基质中进行，利用 ATP 和 NADPH 将 CO2 固定为糖类。"
+                ),
             },
         ],
         "image_paths": [],
     }
 
-    engine = QwenEngine()
-
-    print("\n" + "=" * 60)
-    print("测试1: 生成知识点总结")
-    print("=" * 60)
-    summary = engine.generate_summary(test_material)
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-
-    print("\n" + "=" * 60)
-    print("测试2: 回答问题")
-    print("=" * 60)
-    answer = engine.answer_question(test_material, "光合作用分为哪两个阶段？")
-    print(json.dumps(answer, ensure_ascii=False, indent=2))
-
-    print("\n" + "=" * 60)
-    print("测试3: 生成练习题")
-    print("=" * 60)
-    quiz = engine.generate_quiz(test_material, num_questions=3)
-    print(json.dumps(quiz, ensure_ascii=False, indent=2))
+    engine = QwenEngine(use_mock=True)
+    print(json.dumps(engine.generate_summary(test_material), ensure_ascii=False, indent=2))
+    print(json.dumps(engine.answer_question(test_material, "光合作用分为哪两个阶段？"), ensure_ascii=False, indent=2))
+    print(json.dumps(engine.generate_quiz(test_material, 3), ensure_ascii=False, indent=2))

@@ -17,8 +17,20 @@ main.py - 跨模态教学辅助系统 主程序入口
 import os
 import sys
 import json
-import gradio as gr
 from typing import Dict, Any, Optional
+
+# Gradio 启动时会访问 127.0.0.1 做健康检查。部分 Windows/代理环境会把
+# localhost 请求转发到代理，导致 startup-events 返回 502，这里强制绕过代理。
+LOCALHOST_BYPASS = "127.0.0.1,localhost,::1"
+for proxy_key in ("NO_PROXY", "no_proxy"):
+    current_value = os.environ.get(proxy_key, "")
+    entries = [item.strip() for item in current_value.split(",") if item.strip()]
+    for local_host in LOCALHOST_BYPASS.split(","):
+        if local_host not in entries:
+            entries.append(local_host)
+    os.environ[proxy_key] = ",".join(entries)
+
+import gradio as gr
 
 # 将项目根目录加入Python路径，确保模块导入正常
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +47,37 @@ from modules.utils.helpers import ensure_dir
 RAW_DIR = os.path.join(PROJECT_ROOT, "data", "raw")
 PROCESSED_DIR = os.path.join(PROJECT_ROOT, "data", "processed")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data", "outputs")
+
+CUSTOM_CSS = """
+.main-title {
+    text-align: center;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 20px;
+    border-radius: 10px;
+    margin-bottom: 20px;
+}
+.main-title h1 {
+    margin: 0;
+    font-size: 2em;
+}
+.main-title p {
+    margin: 5px 0 0 0;
+    opacity: 0.9;
+}
+.section-title {
+    border-left: 4px solid #667eea;
+    padding-left: 12px;
+    margin-top: 10px;
+    margin-bottom: 10px;
+}
+footer {
+    text-align: center;
+    color: #999;
+    padding: 20px;
+    font-size: 0.85em;
+}
+"""
 
 # 确保目录存在
 for d in [RAW_DIR, PROCESSED_DIR, OUTPUT_DIR]:
@@ -231,42 +274,8 @@ def _format_images_for_display(material_data: Dict) -> str:
 def create_ui():
     """构建Gradio Web界面"""
 
-    # 自定义CSS
-    custom_css = """
-    .main-title {
-        text-align: center;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 20px;
-        border-radius: 10px;
-        margin-bottom: 20px;
-    }
-    .main-title h1 {
-        margin: 0;
-        font-size: 2em;
-    }
-    .main-title p {
-        margin: 5px 0 0 0;
-        opacity: 0.9;
-    }
-    .section-title {
-        border-left: 4px solid #667eea;
-        padding-left: 12px;
-        margin-top: 10px;
-        margin-bottom: 10px;
-    }
-    footer {
-        text-align: center;
-        color: #999;
-        padding: 20px;
-        font-size: 0.85em;
-    }
-    """
-
     with gr.Blocks(
-        css=custom_css,
         title="跨模态教学辅助系统",
-        theme=gr.themes.Soft(),
     ) as app:
 
         # ---- 状态变量 ----
@@ -438,6 +447,29 @@ def create_ui():
     return app
 
 
+def launch_ui(app_ui):
+    """启动 Gradio，并兼容 Gradio 4.x 与 6.x 的参数位置差异。"""
+    launch_kwargs = {
+        "server_name": "127.0.0.1",
+        "server_port": 7860,
+        "share": False,
+        "inbrowser": True,
+        "show_error": True,
+    }
+
+    try:
+        app_ui.launch(
+            **launch_kwargs,
+            css=CUSTOM_CSS,
+            theme=gr.themes.Soft(),
+        )
+    except TypeError as exc:
+        # Gradio 4.x 仍然要求 css/theme 放在 Blocks 构造函数里。
+        if "css" not in str(exc) and "theme" not in str(exc):
+            raise
+        app_ui.launch(**launch_kwargs)
+
+
 # ============================================================
 # 程序入口
 # ============================================================
@@ -462,10 +494,4 @@ if __name__ == "__main__":
     app_ui = create_ui()
     app_ui.queue()  # 启用请求队列，防止并发问题
 
-    app_ui.launch(
-        server_name="127.0.0.1",
-        server_port=7860,
-        share=False,       # 如需外网访问可设为True（生成临时公网链接）
-        inbrowser=True,    # 自动打开浏览器
-        show_error=True,
-    )
+    launch_ui(app_ui)
