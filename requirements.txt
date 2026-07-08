@@ -1,20 +1,25 @@
-# ============================================
-# 跨模态教学辅助系统 - Python 依赖
-# 安装方式: pip install -r requirements.txt
-# ============================================
+# Cross-modal Teaching Assistant dependencies
+# Install with: pip install -r requirements.txt
 
-# Web 界面
-gradio>=4.0.0
+# Web UI
+gradio>=4.0.0,<5.0
+huggingface_hub<1.0
+numpy>=1.23,<2.0
+pandas>=2.0,<2.3
 
-# Qwen-VL API (阿里云 DashScope)
+# Qwen-VL API via Alibaba Cloud DashScope
 dashscope>=1.14.0
 
-# PDF 文本提取
+# PDF parsing
 PyPDF2>=3.0.0
 pdfplumber>=0.7.0
+PyMuPDF>=1.24.0
 
-# PPT 文本提取
+# PPT parsing
 python-pptx>=0.6.21
 
-# 图像处理
+# Image processing
 Pillow>=10.0.0
+
+# Video frame extraction used by processor.py
+opencv-python>=4.8.0
