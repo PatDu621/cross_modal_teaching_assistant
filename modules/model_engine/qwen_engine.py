@@ -296,19 +296,33 @@ class QwenEngine:
             return {"error": "模型未返回有效内容"}
 
         candidate = self._extract_json_candidate(raw_response)
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            return {
-                "error": f"模型输出不是合法 JSON：{exc}",
-                "raw_output": raw_response[:1000],
-            }
+        candidates = [candidate]
+        sanitized = self._sanitize_json_candidate(candidate)
+        if sanitized != candidate:
+            candidates.append(sanitized)
+
+        last_error = None
+        for item in candidates:
+            try:
+                return json.loads(item)
+            except json.JSONDecodeError as exc:
+                last_error = exc
+
+        return {
+            "error": f"模型输出不是合法 JSON：{last_error}",
+            "raw_output": raw_response[:4000],
+        }
 
     def _normalize_summary(
         self, parsed: Dict[str, Any], material_data: Dict[str, Any]
     ) -> Dict[str, Any]:
         material_id = material_data["material_id"]
         if "error" in parsed:
+            raw_output = str(parsed.get("raw_output") or "").strip()
+            if raw_output:
+                return self._fallback_summary_from_raw(
+                    raw_output, material_data, parsed["error"]
+                )
             parsed["material_id"] = material_id
             return parsed
 
@@ -551,7 +565,9 @@ class QwenEngine:
         return [sentence for score, sentence in scored[:2] if score > 0]
 
     def _extract_json_candidate(self, raw_response: str) -> str:
-        fenced = re.search(r"```(?:json)?\s*(.*?)```", raw_response, re.DOTALL)
+        fenced = re.search(
+            r"```(?:json)?\s*(.*?)```", raw_response, re.DOTALL | re.IGNORECASE
+        )
         if fenced:
             return fenced.group(1).strip()
 
@@ -561,6 +577,51 @@ class QwenEngine:
             return raw_response[start : end + 1].strip()
 
         return raw_response.strip()
+
+    def _sanitize_json_candidate(self, candidate: str) -> str:
+        cleaned = candidate.strip().lstrip("\ufeff")
+        cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+        return cleaned
+
+    def _fallback_summary_from_raw(
+        self, raw_output: str, material_data: Dict[str, Any], warning: str
+    ) -> Dict[str, Any]:
+        summary = self._clean_model_text(raw_output)
+        key_points = self._extract_key_points_from_text(summary)
+
+        if not key_points:
+            key_points = self._mock_key_points(self._material_sentences(material_data))
+
+        return {
+            "material_id": material_data["material_id"],
+            "summary": summary or "模型返回了内容，但格式不规范，已保留原始文本供查看。",
+            "key_points": key_points[:5],
+            "parse_warning": warning,
+        }
+
+    def _clean_model_text(self, raw_output: str) -> str:
+        text = raw_output.strip()
+        text = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)
+        text = text.replace("```", "").strip()
+        if len(text) > 4000:
+            text = text[:4000].rstrip() + "\n\n..."
+        return text
+
+    def _extract_key_points_from_text(self, text: str) -> List[str]:
+        points = []
+        for line in text.splitlines():
+            match = re.match(r"^\s*(?:[-*+]|\d+[\.\)]|\d+\u3001)\s*(.+?)\s*$", line)
+            if not match:
+                continue
+            point = match.group(1).strip(" \"'")
+            if point and len(point) <= 160:
+                points.append(point)
+
+        unique_points = []
+        for point in points:
+            if point not in unique_points:
+                unique_points.append(point)
+        return unique_points
 
     def _truncate_text(self, text: str, max_chars: int) -> str:
         if len(text) <= max_chars:

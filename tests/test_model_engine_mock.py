@@ -68,6 +68,43 @@ class TestQwenEngineMock(unittest.TestCase):
         self.assertEqual(parsed["summary"], "测试总结")
         self.assertEqual(parsed["key_points"], ["A", "B", "C"])
 
+    def test_parse_json_response_repairs_trailing_commas(self):
+        raw = """
+        ```json
+        {
+          "summary": "test summary",
+          "key_points": ["A", "B", "C",],
+        }
+        ```
+        """
+        parsed = self.engine._parse_json_response(raw)
+
+        self.assertNotIn("error", parsed)
+        self.assertEqual(parsed["summary"], "test summary")
+        self.assertEqual(parsed["key_points"], ["A", "B", "C"])
+
+    def test_normalize_summary_falls_back_to_plain_text(self):
+        raw = """
+        Summary:
+        This lesson explains photosynthesis.
+        1. Light reaction creates ATP and NADPH.
+        2. Dark reaction fixes carbon dioxide.
+        """
+        parsed = self.engine._parse_json_response(raw)
+        result = self.engine._normalize_summary(parsed, self.material)
+
+        self.assertNotIn("error", result)
+        self.assertEqual(result["material_id"], "material_test_001")
+        self.assertIn("photosynthesis", result["summary"])
+        self.assertEqual(
+            result["key_points"],
+            [
+                "Light reaction creates ATP and NADPH.",
+                "Dark reaction fixes carbon dioxide.",
+            ],
+        )
+        self.assertIn("parse_warning", result)
+
 
 if __name__ == "__main__":
     unittest.main()
