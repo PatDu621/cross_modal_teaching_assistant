@@ -110,6 +110,35 @@ def _patch_gradio_client_schema_parser() -> None:
 
 _patch_gradio_client_schema_parser()
 
+
+def _patch_starlette_template_response_for_gradio() -> None:
+    """兼容 Gradio 4.x 与新版 Starlette 的 TemplateResponse 参数顺序差异。"""
+    try:
+        from starlette.templating import Jinja2Templates
+    except Exception:
+        return
+
+    original = getattr(Jinja2Templates, "TemplateResponse", None)
+    if original is None or getattr(original, "_gradio_compat_patched", False):
+        return
+
+    def compatible_template_response(self, *args, **kwargs):
+        # Gradio 4.x 调用方式: TemplateResponse(template_name, context, ...)
+        # Starlette 1.x 调用方式: TemplateResponse(request, template_name, context, ...)
+        if len(args) >= 2 and isinstance(args[0], str) and isinstance(args[1], dict):
+            name = args[0]
+            context = args[1]
+            request = context.get("request")
+            if request is not None:
+                return original(self, request, name, context, *args[2:], **kwargs)
+        return original(self, *args, **kwargs)
+
+    compatible_template_response._gradio_compat_patched = True
+    Jinja2Templates.TemplateResponse = compatible_template_response
+
+
+_patch_starlette_template_response_for_gradio()
+
 # 将项目根目录加入 Python 路径，确保模块导入正常。
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)

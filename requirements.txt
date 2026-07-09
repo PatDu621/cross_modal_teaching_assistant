@@ -3,6 +3,8 @@
 
 # Web UI
 gradio>=4.0.0,<5.0
+fastapi<0.116
+starlette<0.39
 huggingface_hub<1.0
 numpy>=1.23,<2.0
 pandas>=2.0,<2.3

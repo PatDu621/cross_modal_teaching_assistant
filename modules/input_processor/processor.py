@@ -14,18 +14,12 @@ import os
 import shutil
 from typing import List, Dict, Any, Tuple
 
-# PDF解析（替换为PyMuPDF）
-import fitz  # PyMuPDF
-
 # PPT解析
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 # 图像处理
 from PIL import Image
-
-# 视频处理（可选）
-import cv2
 
 # 项目内工具
 import sys
@@ -127,6 +121,8 @@ class MaterialProcessor:
         ensure_dir(img_dir)
 
         try:
+            import fitz  # PyMuPDF
+
             doc = fitz.open(file_path)
             for page_num, page in enumerate(doc, start=1):
                 # ---- 提取文本 ----
@@ -160,6 +156,8 @@ class MaterialProcessor:
             if not text_blocks:
                 print("[提示] PDF 中未提取到文本内容，可能是扫描版 PDF")
 
+        except ImportError:
+            print("[错误] 缺少 PyMuPDF 依赖，请运行: pip install PyMuPDF")
         except Exception as e:
             print(f"[错误] PDF 解析失败: {e}")
 
@@ -277,6 +275,8 @@ class MaterialProcessor:
         ensure_dir(img_dir)
 
         try:
+            import cv2
+
             cap = cv2.VideoCapture(file_path)
             if not cap.isOpened():
                 print(f"[错误] 无法打开视频文件: {file_path}")
@@ -307,6 +307,8 @@ class MaterialProcessor:
             cap.release()
             print(f"[完成] 从视频中抽取 {saved_count} 帧")
 
+        except ImportError:
+            print("[错误] 缺少 opencv-python 依赖，请运行: pip install opencv-python")
         except Exception as e:
             print(f"[错误] 视频处理失败: {e}")
 

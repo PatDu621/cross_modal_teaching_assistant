@@ -14,6 +14,7 @@ qwen_engine.py - Qwen-VL 模型调用封装
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -240,7 +241,7 @@ class QwenEngine:
             )
 
         for image_path in self._valid_image_paths(material_data):
-            content.append({"image": f"file://{image_path}"})
+            content.append({"image": self._image_uri(image_path)})
 
         content.append({"text": prompt})
         return [{"role": "user", "content": content}]
@@ -510,6 +511,10 @@ class QwenEngine:
         if os.path.isabs(path):
             return path
         return os.path.abspath(os.path.join(PROJECT_ROOT, path))
+
+    def _image_uri(self, path: str) -> str:
+        """Return a standards-compliant file URI for DashScope local image input."""
+        return Path(path).resolve().as_uri()
 
     def _material_sentences(self, material_data: Dict[str, Any]) -> List[str]:
         text = self._format_material_text(material_data.get("text_blocks", []))

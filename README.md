@@ -49,31 +49,36 @@ cross_modal_teaching_assistant/
 
 ### 1. 环境准备
 
-Python 3.9+ 环境（推荐使用虚拟环境）：
+推荐使用 **Python 3.12**。不建议使用 Python 3.14，因为部分科学计算依赖可能没有对应的 Windows 预编译包，会触发本地编译失败。
 
-```bash
-# 创建虚拟环境（可选）
-python -m venv venv
+先确认本机 Python 版本：
 
-# Windows 激活虚拟环境
-venv\Scripts\activate
+```cmd
+py -0p
+```
 
-# Linux/Mac 激活虚拟环境
-source venv/bin/activate
+如果能看到 `3.12`，进入项目根目录后创建虚拟环境：
+
+```cmd
+cd "你的路径\cross_modal_teaching_assistant\cross_modal_teaching_assistant"
+py -3.12 -m venv .venv
+.venv\Scripts\activate
 ```
 
 ### 2. 安装依赖
 
-```bash
-cd cross_modal_teaching_assistant
-pip install -r requirements.txt
+激活虚拟环境后安装依赖：
+
+```cmd
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 ### 3. 设置 API Key
 
 前往 [阿里云百炼平台](https://dashscope.console.aliyun.com/) 申请 DashScope API Key。
 
-**Windows (CMD):**
+**Windows CMD（推荐）：**
 ```cmd
 set DASHSCOPE_API_KEY=sk-your-api-key-here
 ```
@@ -88,15 +93,49 @@ $env:DASHSCOPE_API_KEY="sk-your-api-key-here"
 export DASHSCOPE_API_KEY=sk-your-api-key-here
 ```
 
-> ⚠️ **注意**: 如果不设置 API Key，系统会以 **Mock 模式** 运行，生成占位数据用于界面演示。真实的 AI 功能需要有效的 API Key。
+> ⚠️ 注意：API Key 只需要设置在当前终端窗口中，不要写进代码，也不要提交到 GitHub。如果不设置 API Key，系统会以 **Mock 模式** 运行，生成占位数据用于界面演示。真实的 AI 功能需要有效的 API Key。
 
 ### 4. 启动应用
 
-```bash
+```cmd
 python app/main.py
 ```
 
 浏览器会自动打开 `http://127.0.0.1:7860`，看到系统界面即表示启动成功。
+
+如果浏览器没有自动打开，可以手动访问：
+
+```text
+http://127.0.0.1:7860
+```
+
+### 5. 运行测试
+
+```cmd
+python -m unittest discover -s tests -v
+```
+
+当前测试会覆盖模型模块 Mock 输出、PDF/PPT/图片解析和接口格式。
+
+### 6. Windows 常见问题
+
+**问题 1：安装依赖时报 numpy 编译错误**
+
+通常是因为使用了 Python 3.14。请安装并使用 Python 3.12，然后重新创建 `.venv`。
+
+**问题 2：启动后 localhost 访问失败**
+
+项目已在 `app/main.py` 中默认绕过 localhost 代理。如果仍失败，可在启动前执行：
+
+```cmd
+set NO_PROXY=127.0.0.1,localhost,::1
+set no_proxy=127.0.0.1,localhost,::1
+python app/main.py
+```
+
+**问题 3：页面显示 Mock 模式**
+
+说明当前进程没有读到 `DASHSCOPE_API_KEY`。请在同一个终端窗口中先执行 `set DASHSCOPE_API_KEY=...`，再执行 `python app/main.py`。
 
 ---
 
@@ -180,7 +219,7 @@ python app/main.py
 | 多模态模型 | Qwen-VL-Plus (DashScope) | 阿里云视觉语言模型，支持文本+图像联合推理 |
 | 后端框架 | Python | 主语言，生态丰富 |
 | Web界面 | Gradio 4.x | 零前端代码，Python 直接构建交互界面 |
-| PDF解析 | pdfplumber | 稳定可靠的PDF文本提取 |
+| PDF解析 | PyMuPDF / pdfplumber | PDF文本与图片提取 |
 | PPT解析 | python-pptx | Office Open XML格式PPT解析 |
 | 图像处理 | Pillow (PIL) | 图像验证和基础处理 |
 
@@ -190,8 +229,8 @@ python app/main.py
 
 > 以下功能在当前版本中使用简化方案或占位数据，详见各模块源码中的注释。
 
-1. **PDF 内嵌图片提取** — 暂不支持。pdfplumber 主要用于文本提取，不提取图片。如需图片模态输入，请使用界面中的"补充上传图片"功能。
-2. **PPT 幻灯片渲染为图片** — 暂不支持。需要外部工具（如 LibreOffice）将每页PPT导出为图片。当前可手动上传截图。
+1. **PDF 内嵌图片提取** — 当前使用 PyMuPDF 提取文本和内嵌图片，但扫描版 PDF 的文字识别仍需要额外 OCR 能力。
+2. **PPT 幻灯片渲染为图片** — 暂不支持整页渲染。当前支持提取 PPT 文本和内嵌图片，如需整页视觉信息，可手动上传 PPT 截图。
 3. **Mock 模式** — 未设置 API Key 时，`qwen_engine.py` 中的三个函数返回模拟数据，内容带有 `【模拟数据】` 标记。设置 DASHSCOPE_API_KEY 后自动切换为真实API调用。
 4. **长文本处理** — Qwen-VL 的上下文窗口有限，超长材料会被截断。建议将大文件拆分为多个小文件分别处理。
 5. **PPT .ppt 格式** — 仅完整支持 `.pptx`（Office 2007+）。旧版 `.ppt` 格式支持有限。
